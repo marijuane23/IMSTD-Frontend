@@ -253,6 +253,7 @@ export const api = {
     const res = await request(`/wall?${params.toString()}`);
     const normalized = {
       ...res,
+      total: typeof res.total === 'number' ? res.total : (res.items || []).length,
       items: (res.items || []).map(item => ({
         ...item,
         image_url: resolveMediaUrl(item.image_url),
@@ -260,6 +261,23 @@ export const api = {
     };
     setCached(cacheKey, normalized, 30); // 30 seconds
     return normalized;
+  },
+
+  // Unbiased Random Wall Greetings directly from the entire database (picks from all greetings)
+  async getRandomWallGreetings(limit = 5) {
+    try {
+      const res = await request(`/wall/random?limit=${encodeURIComponent(limit)}`);
+      if (res && res.items) {
+        return res.items.map(item => ({
+          ...item,
+          image_url: resolveMediaUrl(item.image_url),
+        }));
+      }
+      return [];
+    } catch (err) {
+      console.warn('Failed to fetch random wall greetings from API, falling back to local pool:', err);
+      return [];
+    }
   },
 
   // Dropdown list for WallSubmissionPanel (Cached in frontend for 5 minutes)

@@ -53,6 +53,7 @@ export function WallCanvas() {
   const isDark = theme === 'dark';
 
   const [greetings, setGreetings] = useState([]);
+  const [realTotalCount, setRealTotalCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [focusedCard, setFocusedCard] = useState(null);
@@ -139,12 +140,12 @@ export function WallCanvas() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [focusedCard, isSearchOpen, searchQuery]);
 
-  // Fetch greetings directly from database via API
+  // Fetch greetings directly from database via API (at least 200 newest for smooth 3D performance)
   useEffect(() => {
     let isMounted = true;
     const fetchWallGreetings = async () => {
       try {
-        const res = await api.getWallGreetings({ limit: 150 });
+        const res = await api.getWallGreetings({ limit: 200 });
         if (isMounted && res.items) {
           const apiFormatted = res.items.map((item, idx) => ({
             id: item.id || `api-${idx}`,
@@ -158,6 +159,7 @@ export function WallCanvas() {
             created_at: item.created_at || null,
           }));
           setGreetings(apiFormatted);
+          setRealTotalCount(typeof res.total === 'number' ? res.total : apiFormatted.length);
 
           // Preload tribute images in background so they are warm in browser memory
           apiFormatted.forEach(item => {
@@ -191,6 +193,7 @@ export function WallCanvas() {
       created_at: newGreeting.created_at || new Date().toISOString(),
     };
     setGreetings(prev => [formatted, ...prev]);
+    setRealTotalCount(prev => prev + 1);
   };
 
   // Filter greetings if search is active
@@ -205,18 +208,17 @@ export function WallCanvas() {
     );
   }, [greetings, searchQuery]);
 
-  // Dynamic capacity & density management:
-  // Scale sphere radius R dynamically based on dataset size N
-  const totalCount = filteredGreetings.length;
+  // Dynamic capacity & density management for the 3D Sphere (renders up to 200 newest items smoothly)
+  const sphereCount = filteredGreetings.length;
   const golden = Math.PI * (3 - Math.sqrt(5));
   const pointsRef = useRef([]);
 
   useEffect(() => {
     pointsRef.current = filteredGreetings.map((d, i) => {
       // Apply shuffle offset so users can randomize viewing distribution
-      const orderIdx = (i + shuffleOffset) % Math.max(1, totalCount);
+      const orderIdx = (i + shuffleOffset) % Math.max(1, sphereCount);
       // Constrain vertical pole compression (0.82) so cards don't bunch at top/bottom poles
-      const y = totalCount <= 1 ? 0 : (1 - (orderIdx / Math.max(1, totalCount - 1)) * 2) * 0.82;
+      const y = sphereCount <= 1 ? 0 : (1 - (orderIdx / Math.max(1, sphereCount - 1)) * 2) * 0.82;
       const rad = Math.sqrt(Math.max(0, 1 - y * y));
       const theta = golden * orderIdx;
       return {
@@ -228,7 +230,7 @@ export function WallCanvas() {
         pal: PALETTE[i % PALETTE.length]
       };
     });
-  }, [filteredGreetings, totalCount, golden, shuffleOffset]);
+  }, [filteredGreetings, sphereCount, golden, shuffleOffset]);
 
   // Dynamic radius fitting with generous spacing to avoid overlapping cards
   useEffect(() => {
@@ -246,14 +248,14 @@ export function WallCanvas() {
       const maxR = isMobile ? 230 : 440;
 
       // Slight density bonus for larger pools so they stay spread out
-      const countSpacing = Math.min(1.25, 1 + Math.max(0, totalCount - 6) * 0.015);
+      const countSpacing = Math.min(1.25, 1 + Math.max(0, sphereCount - 6) * 0.015);
       stateRef.current.R = Math.max(minR, Math.min(maxR, computedR * countSpacing));
     };
 
     fitRadius();
     window.addEventListener('resize', fitRadius);
     return () => window.removeEventListener('resize', fitRadius);
-  }, [totalCount]);
+  }, [sphereCount]);
 
   // Main 3D Render Loop via requestAnimationFrame
   useEffect(() => {
@@ -290,7 +292,7 @@ export function WallCanvas() {
 
       rendered.sort((a, b) => a.Z - b.Z);
 
-      const highDensity = totalCount > 35;
+      const highDensity = sphereCount > 35;
 
       rendered.forEach((r, order) => {
         const el = cardElementsRef.current.get(r.p.id);
@@ -347,7 +349,7 @@ export function WallCanvas() {
     return () => {
       if (animId) cancelAnimationFrame(animId);
     };
-  }, [totalCount]);
+  }, [sphereCount]);
 
   // Pointer position helper
   const pointerPos = (e) => {
@@ -550,11 +552,60 @@ export function WallCanvas() {
   };
 
   // Pick up to 5 random greetings to display in the Spotlight Modal
-  const handlePickRandomGreetings = () => {
+  // Unbiased: queries all greetings across the entire database via API, or falls back to local pool
+  const handlePickRandomGreetings = async () => {
+    // If user is actively searching/filtering, pick randomly from the search results
+    if (searchQuery.trim() && filteredGreetings.length > 0) {
+      const pool = [...filteredGreetings];
+      const shuffled = pool.sort(() => 0.5 - Math.random());
+      const count = Math.min(5, shuffled.length);
+      const picked = shuffled.slice(0, count).map((cardData) => {
+        const idx = greetings.findIndex(g => g.id === cardData.id);
+        const pal = PALETTE[(idx >= 0 ? idx : 0) % PALETTE.length];
+        return { ...cardData, pal };
+      });
+
+      if (picked.length > 0) {
+        setSpotlightSlides(picked);
+        setSlideIndex(0);
+        setFocusedCard(picked[0]);
+      }
+      return;
+    }
+
+    // Completely unbiased: Fetch 5 random greetings directly from the entire database
+    try {
+      const randomItems = await api.getRandomWallGreetings(5);
+      if (randomItems && randomItems.length > 0) {
+        const picked = randomItems.map((item, idx) => {
+          const pal = PALETTE[idx % PALETTE.length];
+          return {
+            id: item.id,
+            to: item.teacher_name || item.to || extractRecipient(item.message_text),
+            msg: item.message_text || '',
+            from: item.sender_name || 'Anonymous',
+            image_url: resolveMediaUrl(item.image_url) || null,
+            teacher_id: item.teacher_id || null,
+            teacher_name: item.teacher_name || null,
+            teacher_slug: item.teacher_slug || null,
+            created_at: item.created_at || null,
+            pal,
+          };
+        });
+
+        setSpotlightSlides(picked);
+        setSlideIndex(0);
+        setFocusedCard(picked[0]);
+        return;
+      }
+    } catch (err) {
+      console.warn('Fallback to local pool for random greetings:', err);
+    }
+
+    // Fallback: Pick from loaded greetings on the sphere
     if (!greetings || greetings.length === 0) return;
 
     const pool = [...greetings];
-    // Random shuffle
     const shuffled = pool.sort(() => 0.5 - Math.random());
     const count = Math.min(5, shuffled.length);
     const picked = shuffled.slice(0, count).map((cardData) => {
@@ -586,14 +637,25 @@ export function WallCanvas() {
 
   return (
     <div className="w-full select-none">
-      {/* Globe Top Toolbar: Count Number Only, Expanding Search Icon, & Zoom Controls */}
+      {/* Globe Top Toolbar: Real Count Number, Expanding Search Icon, & Zoom Controls */}
       <div className="globe-toolbar">
         <div className="flex items-center gap-2">
-          {/* Pill Counter: Number Only with Globe Icon */}
-          <span className="globe-pill shrink-0" title={`${totalCount} Total Greetings`}>
+          {/* Pill Counter: Real Total Count with Globe Icon */}
+          <span
+            className="globe-pill shrink-0"
+            title={
+              searchQuery.trim()
+                ? `${filteredGreetings.length} match${filteredGreetings.length === 1 ? '' : 'es'} (${realTotalCount || greetings.length} total)`
+                : `${realTotalCount || greetings.length} Total Greetings${
+                    greetings.length < (realTotalCount || greetings.length)
+                      ? ` (${greetings.length} newest loaded in 3D orbit)`
+                      : ''
+                  }`
+            }
+          >
             <Globe className="w-4 h-4 text-celebrate-gold shrink-0" />
             <b id="ctext" className="font-extrabold text-sm text-slate-900 dark:text-white leading-none">
-              {totalCount}
+              {searchQuery.trim() ? filteredGreetings.length : (realTotalCount || greetings.length)}
             </b>
           </span>
 
@@ -602,7 +664,7 @@ export function WallCanvas() {
             onClick={handlePickRandomGreetings}
             className="globe-zbtn text-celebrate-gold hover:text-amber-400 hover:scale-105 active:scale-95 transition-all"
             aria-label="Pick 5 random greetings"
-            title="Pick 5 Random Greetings"
+            title="Pick 5 Random Greetings (Unbiased from all tributes)"
           >
             <Sparkles className="w-4 h-4" />
           </button>
